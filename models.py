@@ -14,6 +14,12 @@ class TaskUpdate(BaseModel):
     status: Literal["pending", "in_progress", "completed"]
 
 
+class GeminiResponse(BaseModel):
+    summary: str
+    sub_tasks: list[str]
+    category: str
+
+
 class Task(BaseModel):
     id: str
     title: str
