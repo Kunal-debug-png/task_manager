@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List
-from models import Task, TaskCreate, TaskUpdate
+from models import Task, TaskCreate, TaskUpdate, SubTask, SubTaskUpdate,TaskResultGemini
 from storage import task_storage
 from kafka_publisher import publish_task_event
 
@@ -39,44 +39,43 @@ def create_task(task_data: TaskCreate):
                 prompt = f"""
 Analyze this task and provide:
 1. A brief one-sentence summary
-2. 3-5 potential sub-tasks
+2. Exactly 3 potential sub-tasks
 3. Categorize into one of: Bug Fix, Feature, DevOps, Documentation, Research, Testing
 
 Task Details:
 - Title: {task.title}
 - Description: {task.description}
 - Priority: {task.priority}
-
-Format your response as JSON:
-{{
-  "summary": "one sentence summary",
-  "sub_tasks": ["subtask 1", "subtask 2", "subtask 3"],
-  "category": "category name"
-}}
 """
                 
                 print(f"\nCalling Gemini 2.5 Flash API...")
                 
-                model = genai.GenerativeModel("gemini-2.5-flash")
+                model = genai.GenerativeModel(
+                    model_name="gemini-2.5-flash",
+                    generation_config={
+                        "response_mime_type": "application/json",
+                        "response_schema": TaskResultGemini,
+                    }
+                )
+                
                 response = model.generate_content(prompt)
-                gemini_output = response.text.strip()
-                
-                
-                if "```json" in gemini_output:
-                    gemini_output = gemini_output.split("```json")[1].split("```")[0].strip()
-                elif "```" in gemini_output:
-                    gemini_output = gemini_output.split("```")[1].split("```")[0].strip()
-                
-                result = json.loads(gemini_output)
+                gemini_output = TaskResultGemini.model_validate_json(response.text)
                 
                 
                 print(f" GEMINI 2.5 FLASH OUTPUT")
-                print(f"Summary: {result.get('summary')}")
-                print(f"Category: {result.get('category')}")
+                print(f"Summary: {gemini_output.summary}")
+                print(f"Category: {gemini_output.category}")
                 print(f"\nSub-tasks:")
-                for i, subtask in enumerate(result.get('sub_tasks', []), 1):
+                for i, subtask in enumerate(gemini_output.sub_tasks, 1):
                     print(f"   {i}. {subtask}")
                 
+                # Ensure exactly 3 subtasks
+                subtasks_to_store = gemini_output.sub_tasks[:3]  # Take first 3
+                while len(subtasks_to_store) < 3:
+                    subtasks_to_store.append(f"Additional subtask {len(subtasks_to_store) + 1}")
+                
+                task_storage.create_subtasks(task.id, subtasks_to_store)
+                print(f"\n✓ 3 subtasks stored for task {task.id}")
                 
             except Exception as e:
                 print(f"Gemini API error: {e}\n")
@@ -139,3 +138,42 @@ def delete_task(task_id: str):
     if not success:
         raise HTTPException(status_code=404, detail=f"Task with id '{task_id}' not found")
     return None
+
+
+@router.get("/{task_id}/subtasks", response_model=List[SubTask])
+def get_subtasks(task_id: str):
+    """Get all subtasks for a specific task"""
+    task = task_storage.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task with id '{task_id}' not found")
+    
+    subtasks = task_storage.get_subtasks(task_id)
+    return subtasks
+
+
+@router.get("/{task_id}/subtasks/{subtask_id}", response_model=SubTask)
+def get_subtask(task_id: str, subtask_id: str):
+    """Get a specific subtask"""
+    task = task_storage.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task with id '{task_id}' not found")
+    
+    subtask = task_storage.get_subtask(task_id, subtask_id)
+    if not subtask:
+        raise HTTPException(status_code=404, detail=f"Subtask with id '{subtask_id}' not found")
+    
+    return subtask
+
+
+@router.put("/{task_id}/subtasks/{subtask_id}", response_model=SubTask)
+def update_subtask(task_id: str, subtask_id: str, subtask_update: SubTaskUpdate):
+    """Update a specific subtask status"""
+    task = task_storage.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task with id '{task_id}' not found")
+    
+    subtask = task_storage.update_subtask(task_id, subtask_id, subtask_update.status)
+    if not subtask:
+        raise HTTPException(status_code=404, detail=f"Subtask with id '{subtask_id}' not found")
+    
+    return subtask
